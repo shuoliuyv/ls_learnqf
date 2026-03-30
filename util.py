@@ -4,67 +4,13 @@ from scipy import stats
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
 
-def get_stock_pool(df: pd.DataFrame, date_col: str = 'date', ticker_col: str = 'ticker',
-				   list_date_col: str = 'list_date', st_col: str = 'is_st', suspend_col: str = 'is_suspended',
-				   exclude_new_days: int = 60) -> pd.DataFrame:
-    """
-	从全市场日历数据中剔除ST股、停牌股、以及上市未满 N 天的次新股。
-    
-        df: 包含日度状态的数据框 
-        date_col: 交易日期字段名
-        ticker_col: 股票代码字段名
-        list_date_col: 股票上市日期字段名 (datetime 格式)
-        st_col: 是否 ST 的布尔/整数字段 (1/True代表ST)
-        suspend_col: 是否停牌的布尔/整数字段 (1/True代表停牌)
-        exclude_new_days: 剔除上市天数少于该值的股票 (默认 60 天)
 
-    """
-    df_clean = df.copy()
-    
-    #剔除 ST/PT 股票
-    if st_col in df_clean.columns:
-        df_clean = df_clean[~df_clean[st_col].astype(bool)]
-        
-    #剔除停牌股票
-    if suspend_col in df_clean.columns:
-        df_clean = df_clean[~df_clean[suspend_col].astype(bool)]
-        
-    # 除上市未满 exclude_new_days 天的新股
-    if list_date_col in df_clean.columns:
-        df_clean[date_col] = pd.to_datetime(df_clean[date_col])
-        df_clean[list_date_col] = pd.to_datetime(df_clean[list_date_col])
-        
-        # 计算上市天数
-        listed_days = (df_clean[date_col] - df_clean[list_date_col]).dt.days
-        df_clean = df_clean[listed_days >= exclude_new_days]
-        
-    return df_clean
-
-
-def get_valid_days(df: pd.DataFrame, ticker_col: str = 'ticker', limit_up_col: str = 'is_limit_up',
-                   limit_down_col: str = 'is_limit_down', suspend_col: str = 'is_suspended',
-                   lookback_window: int = 20, min_valid_days: int = 10) -> pd.Series:
-    """
-    获取有效交易日掩码：非停牌且非一字涨跌停，且过去N天满足最低有效天数要求。
-    """
-    df_tmp = df[[ticker_col]].copy()
-    
-    # 标记当天是否有效 (1为有效，0为无效)
-    is_invalid_today = (df[limit_up_col].astype(bool) | df[limit_down_col].astype(bool) | df[suspend_col].astype(bool))
-    df_tmp['is_valid_today'] = (~is_invalid_today).astype(int)
-    
-    # 滚动计算有效天数
-    valid_days_count = df_tmp.groupby(ticker_col)['is_valid_today'].rolling(
-        window=lookback_window, min_periods=1).sum().reset_index(level=0, drop=True)
-    
-    valid_days_count = valid_days_count.reindex(df.index)
-    return valid_days_count >= min_valid_days
-
+#-------------------数据处理----------------------------------------
 
 def calc_fwd_ret(price_df: pd.DataFrame, date_col: str = 'date', ticker_col: str = 'ticker', 
                  price_col: str = 'close', periods: list = [1, 5, 20]) -> pd.DataFrame:
     """
-    计算并对齐未来收益率 (Forward Returns)。
+    计算并对齐未来收益率。
     """
     df = price_df.sort_values(by=[ticker_col, date_col]).copy()
     
@@ -86,12 +32,12 @@ def fillna_with_industry(df: pd.DataFrame, factor_col: str, ind_col: str = 'indu
 
 def rank_factor(s: pd.Series) -> pd.Series:
     """
-    将因子值转化为横截面上的百分比排名 (0 到 1 之间)。应对长尾分布和异常值。
+    将因子值转化为横截面上的百分比排名 (0 到 1)。应对长尾分布和异常值。
     """
     return s.rank(pct=True)
 
 def handle_outliers(s: pd.Series) -> pd.Series:
-    """中位数去极值 (MAD法)"""
+    """中位数去极值 MAD法"""
     median = s.median()
     mad = (s - median).abs().median()
     threshold = 3 * 1.4826 * mad
