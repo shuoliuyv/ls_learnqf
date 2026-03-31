@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 def calc_fwd_ret(price_df: pd.DataFrame, date_col: str = 'date', ticker_col: str = 'ticker', 
                  price_col: str = 'close', periods: list = [1, 5, 20]) -> pd.DataFrame:
     """
-    计算并对齐未来收益率。
+    计算并对齐未来收益率。日频
     """
     df = price_df.sort_values(by=[ticker_col, date_col]).copy()
     

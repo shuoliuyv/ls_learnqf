@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import time
 from datetime import timedelta
+from tqdm import tqdm
+
 
 def is_bj_stock(ts_code):
     """判断是否为北交所股票"""
@@ -159,7 +161,7 @@ class TushareDataCache:
         for d in unique_dates:
             if d not in self.bak_basic_cache:
                 try:
-                    df = self.pro.bak_basic(trade_date=d, fields='ts_code,name,status')
+                    df = self.pro.bak_basic(trade_date=d, fields='ts_code,name')
                     if df is None or df.empty:
                         df = pd.DataFrame(columns=['ts_code', 'name', 'status'])
                 except Exception:
@@ -275,7 +277,7 @@ def get_rebalance_schedule(cache, start_date, end_date, freq='M', exchange='SSE'
 
 def get_base_and_traded_pool(cache, signal_date, pool_type='ALL', include_bj=False):
     """
-    获取基础池并剔除停牌。注意：这里用 signal_date，而不是 trade_date
+    获取基础池并剔除停牌。注意：signal_date而不是 trade_date
     """
     daily_data = cache.get_daily(signal_date)
 
@@ -326,9 +328,7 @@ def filter_st_stocks(cache, signal_date, pool_df):
     if day_basic.empty:
         return pool_df
 
-    valid_stocks = day_basic[
-        ~day_basic['name'].str.contains('ST|\\*ST|SST|退', regex=True, na=False)]
-    valid_stocks = valid_stocks[valid_stocks['status'] == 'L']
+    valid_stocks = day_basic[~day_basic['name'].str.contains('ST|\\*ST|SST|退', regex=True, na=False)]
 
     filtered_pool = pool_df[pool_df['ts_code'].isin(valid_stocks['ts_code'])]
     return filtered_pool.drop_duplicates().reset_index(drop=True)
@@ -399,7 +399,9 @@ def filter_by_market_cap(cache, signal_date, pool_df, min_mcap=None, max_mcap=No
 
 def get_clean_stock_pool(cache, signal_date, pool_type='ALL',include_bj=False,min_list_days=60,
                          min_amount=None,bj_min_amount=None,min_mcap=None,max_mcap=None):
-    """选取样本空间"""
+    """
+	选取样本空间
+	"""
     pool = get_base_and_traded_pool(cache, signal_date, pool_type, include_bj)
     if pool.empty:
         return []
@@ -413,10 +415,7 @@ def get_clean_stock_pool(cache, signal_date, pool_type='ALL',include_bj=False,mi
         return []
 
     if min_amount is not None or bj_min_amount is not None:
-        pool = filter_by_liquidity(
-            cache,
-            signal_date,
-            pool,
+        pool = filter_by_liquidity(cache,signal_date,pool,
             0 if min_amount is None else min_amount,
             0 if bj_min_amount is None else bj_min_amount)
         if pool.empty:
@@ -442,12 +441,7 @@ def preload_backtest_data(cache, start_date, end_date,pool_type='ALL',freq='M',
     - 若需要市值过滤，则拉所有 signal_date 对应的 daily_basic
     - 若 pool_type 为指数/指数列表，则预拉所有相关指数成分
     """
-    schedule = get_rebalance_schedule(
-        cache,
-        start_date,
-        end_date,
-        freq=freq,
-        exchange=exchange)
+    schedule = get_rebalance_schedule(cache,start_date,end_date,freq=freq,exchange=exchange)
     signal_dates = [x['signal_date'] for x in schedule]
 
     cache.preload_stock_basic()
@@ -471,47 +465,24 @@ def preload_backtest_data(cache, start_date, end_date,pool_type='ALL',freq='M',
 def get_history_sample_space_df(pro, start_date, end_date,pool_type='ALL',include_bj=False, min_list_days=60,min_amount=None,
                                 bj_min_amount=None,min_mcap=None,max_mcap=None,freq='M', sleep_interval=0.0, exchange='SSE',
                                 index_lookback_days=30,return_signal_date=True):
-    """
-    遍历调仓日，返回包含所有有效样本的 DataFrame
-
-    参数说明：
-    - min_amount / bj_min_amount:
-        None 表示不做成交额门槛过滤
-        但默认仍会剔除当日无成交股票（停牌）
-    - min_mcap / max_mcap:
-        None 表示不做市值过滤
-    """
+    
     cache = TushareDataCache(pro, sleep_interval=sleep_interval)
 
     schedule = preload_backtest_data(
-        cache=cache,
-        start_date=start_date,
-        end_date=end_date,
-        pool_type=pool_type,
-        freq=freq,
-        exchange=exchange,
-        min_mcap=min_mcap,
-        max_mcap=max_mcap,
-        index_lookback_days=index_lookback_days)
+        cache=cache, start_date=start_date, end_date=end_date,
+        pool_type=pool_type, freq=freq, exchange=exchange,
+        min_mcap=min_mcap, max_mcap=max_mcap, index_lookback_days=index_lookback_days)
 
     records = []
-    total_dates = len(schedule)
 
-    for i, item in enumerate(schedule):
+    for i, item in enumerate(tqdm(schedule, desc="构建历史样本空间")):
         signal_date = item['signal_date']
         trade_date = item['trade_date']
 
-
-        valid_pool = get_clean_stock_pool(
-            cache=cache,
-            signal_date=signal_date,
-            pool_type=pool_type,
-            include_bj=include_bj,
-            min_list_days=min_list_days,
-            min_amount=min_amount,
-            bj_min_amount=bj_min_amount,
-            min_mcap=min_mcap,
-            max_mcap=max_mcap)
+        valid_pool = get_clean_stock_pool(cache=cache, signal_date=signal_date, pool_type=pool_type,
+            include_bj=include_bj, min_list_days=min_list_days,
+            min_amount=min_amount, bj_min_amount=bj_min_amount,
+            min_mcap=min_mcap, max_mcap=max_mcap)
 
         if return_signal_date:
             for ticker in valid_pool:
@@ -526,7 +497,6 @@ def get_history_sample_space_df(pro, start_date, end_date,pool_type='ALL',includ
                     'ts_code': ticker})
 
     df_sample_space = pd.DataFrame(records)
-
     return df_sample_space
 
 
@@ -547,10 +517,7 @@ def get_single_rebalance_stock_pool(pro, trade_date,pool_type='ALL',include_bj=F
         None 表示不做市值过滤
     """
     cache = TushareDataCache(pro, sleep_interval=sleep_interval)
-    signal_date = cache.get_prev_open_date(
-        trade_date,
-        exchange=exchange,
-        lookback_days=60)
+    signal_date = cache.get_prev_open_date(trade_date,exchange=exchange,lookback_days=60)
 
     if signal_date is None:
         return []
@@ -567,57 +534,35 @@ def get_single_rebalance_stock_pool(pro, trade_date,pool_type='ALL',include_bj=F
         [signal_date],
         lookback_days=index_lookback_days)
 
-    return get_clean_stock_pool(
-        cache=cache,
-        signal_date=signal_date,
-        pool_type=pool_type,
-        include_bj=include_bj,
-        min_list_days=min_list_days,
-        min_amount=min_amount,
-        bj_min_amount=bj_min_amount,
-        min_mcap=min_mcap,
-        max_mcap=max_mcap)
+    return get_clean_stock_pool(cache=cache,signal_date=signal_date,pool_type=pool_type,include_bj=include_bj,min_list_days=min_list_days,
+								min_amount=min_amount,bj_min_amount=bj_min_amount,min_mcap=min_mcap,max_mcap=max_mcap)
 
 
-def get_daily_price_for_universe(pro, universe_df,
-                                 start_date=None,
-                                 end_date=None,
-                                 fields='ts_code,trade_date,open,high,low,close,vol,amount'):
+def get_daily_price_for_universe(pro, universe_df,start_date=None,end_date=None,fields='ts_code,trade_date,open,high,low,close,vol,amount'):
     """
-    只获取股票池内股票的日行情数据
-
-    参数:
-        pro: tushare pro 接口
-        universe_df: 股票池 DataFrame（至少包含 ts_code）
-        start_date: 可选，YYYYMMDD
-        end_date: 可选，YYYYMMDD
-        fields: 返回字段
-
-    返回:
-        DataFrame: 股票池对应的行情数据
+    提取样本空间内日行情
     """
 
-    # ========= 提取股票列表 =========
+    #提取股票列表
     ts_codes = universe_df['ts_code'].drop_duplicates().tolist()
 
     if len(ts_codes) == 0:
         return pd.DataFrame(columns=fields.split(','))
 
-    # ========= 分批请求（Tushare限制）=========
     all_data = []
 
-    batch_size = 50  # tushare 一般限制
-    for i in range(0, len(ts_codes), batch_size):
-        batch_codes = ts_codes[i:i + batch_size]
+    for ts_code in tqdm(ts_codes, desc="下载区间日频行情"):
+        try:
+            df = pro.daily(ts_code=ts_code,start_date=start_date,end_date=end_date,fields=fields)
 
-        df = pro.daily(
-            ts_code=','.join(batch_codes),
-            start_date=start_date,
-            end_date=end_date,
-            fields=fields)
-
-        if df is not None and not df.empty:
-            all_data.append(df)
+            if df is not None and not df.empty:
+                all_data.append(df)
+                
+            time.sleep(0.02) 
+            
+        except Exception as e:
+            print(f"请求 {ts_code} 数据时发生错误: {e}")
+            time.sleep(0.5) # 发生异常时退让等待一下
 
     if not all_data:
         return pd.DataFrame(columns=fields.split(','))
