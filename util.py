@@ -52,6 +52,67 @@ def handle_outliers(s: pd.Series) -> pd.Series:
     threshold = 3 * 1.4826 * mad
     return s.clip(median - threshold, median + threshold)
 
+def build_price_volume_features(df: pd.DataFrame,ticker_col: str = 'ticker',date_col: str = 'date',close_col: str = 'close',
+                                amount_col: str = 'amount',windows: dict = None,beta_window: int = 60, min_beta_obs: int = 20,
+								market_ret: pd.Series = None) -> pd.DataFrame:
+    """
+    从价格量数据构造常见风格特征。
+    
+    生成列包括：
+    - ret
+    - momentum
+    - volatility
+    - liquidity
+    - beta
+
+    参数:
+    - windows: {'momentum': 20, 'volatility': 20, 'liquidity': 20}
+    - market_ret: 可选，外部传入市场收益率；若不传则默认按全市场等权收益率构造
+    """
+    if windows is None:
+        windows = {'momentum': 20, 'volatility': 20, 'liquidity': 20}
+
+    out = df.copy()
+    out[date_col] = pd.to_datetime(out[date_col])
+    out = out.sort_values([ticker_col, date_col]).copy()
+
+    out['ret'] = out.groupby(ticker_col)[close_col].pct_change()
+
+    if market_ret is None:
+        market_ret = out.groupby(date_col)['ret'].mean().rename('market_ret')
+
+    out = out.merge(market_ret.rename('market_ret'), on=date_col, how='left')
+
+    mom_w = windows.get('momentum', 20)
+    vol_w = windows.get('volatility', 20)
+    liq_w = windows.get('liquidity', 20)
+
+    out['momentum'] = (
+        out.groupby(ticker_col)['ret']
+        .transform(lambda x: (1 + x).rolling(mom_w).apply(np.prod, raw=True) - 1))
+
+    out['volatility'] = (
+        out.groupby(ticker_col)['ret']
+        .transform(lambda x: x.rolling(vol_w).std()))
+
+    out['liquidity'] = (
+        out.groupby(ticker_col)[amount_col]
+        .transform(lambda x: np.log1p(x).rolling(liq_w).mean()))
+
+    def _rolling_beta(g):
+        x = g['market_ret']
+        y = g['ret']
+        cov_xy = y.rolling(beta_window, min_periods=min_beta_obs).cov(x)
+        var_x = x.rolling(beta_window, min_periods=min_beta_obs).var()
+        return cov_xy / (var_x + 1e-12)
+
+    out['beta'] = (
+        out.groupby(ticker_col, group_keys=False)
+        .apply(_rolling_beta)
+        .reset_index(level=0, drop=True))
+
+    return out
+
 
 def standardize(s: pd.Series) -> pd.Series:
     """
@@ -59,28 +120,112 @@ def standardize(s: pd.Series) -> pd.Series:
     """
     return (s - s.mean()) / (s.std() + 1e-12)
 
-
-def neutralize(df: pd.DataFrame, factor_col: str, mcap_col: str = 'market_cap',
-               ind_col: str = 'industry') -> pd.Series:
+def neutralize_factors(df: pd.DataFrame,factor_col: str,numeric_exposure_cols: list = None,categorical_exposure_cols: list = None,
+					   log_transform_cols: list = None,min_obs: int = 20, add_constant: bool = True) -> pd.Series:
     """
-    通用市值行业中性化函数
+    通用横截面中性化函数。
+    
+    用数值型暴露 + 类别型暴露对 factor_col 做横截面 OLS 回归，
+    返回残差序列。
+    
+    示例:
+    numeric_exposure_cols = ['market_cap', 'momentum', 'volatility', 'liquidity', 'beta']
+    categorical_exposure_cols = ['industry']
+    log_transform_cols = ['market_cap']
     """
-    df_clean = df.dropna(subset=[factor_col, mcap_col, ind_col]).copy()
+    if numeric_exposure_cols is None:
+        numeric_exposure_cols = []
+    if categorical_exposure_cols is None:
+        categorical_exposure_cols = []
+    if log_transform_cols is None:
+        log_transform_cols = []
 
-    if len(df_clean) < 10:
+    use_cols = [factor_col] + numeric_exposure_cols + categorical_exposure_cols
+    df_clean = df.dropna(subset=use_cols).copy()
+
+    if len(df_clean) < min_obs:
         return pd.Series(index=df.index, dtype=float)
 
-    y = df_clean[factor_col]
-    size = np.log(df_clean[mcap_col])
-    industry = pd.get_dummies(df_clean[ind_col], drop_first=True)
+    y = df_clean[factor_col].astype(float)
 
-    X = pd.concat([size, industry], axis=1)
-    X = sm.add_constant(X)
+    X_parts = []
+
+    if len(numeric_exposure_cols) > 0:
+        X_num = df_clean[numeric_exposure_cols].astype(float).copy()
+
+        for col in log_transform_cols:
+            if col in X_num.columns:
+                X_num[col] = np.log(X_num[col].replace(0, np.nan))
+
+        X_num = X_num.replace([np.inf, -np.inf], np.nan)
+        valid_mask = X_num.notna().all(axis=1)
+
+        df_clean = df_clean.loc[valid_mask].copy()
+        y = y.loc[valid_mask]
+        X_num = X_num.loc[valid_mask]
+
+        if len(df_clean) < min_obs:
+            return pd.Series(index=df.index, dtype=float)
+
+        X_parts.append(X_num)
+
+    for col in categorical_exposure_cols:
+        dummies = pd.get_dummies(df_clean[col], prefix=col, drop_first=True, dtype=float)
+        X_parts.append(dummies)
+
+    if len(X_parts) == 0:
+        return pd.Series(index=df.index, dtype=float)
+
+    X = pd.concat(X_parts, axis=1)
+
+    if add_constant:
+        X = sm.add_constant(X)
 
     model = sm.OLS(y, X).fit()
-    return model.resid.reindex(df.index)
+    resid = pd.Series(model.resid, index=df_clean.index)
 
+    return resid.reindex(df.index)
+	
 
+def preprocess_factor_general(df: pd.DataFrame,factor_col: str, date_col: str = 'date', winsorize_func=None, standardize_func=None,
+							  fillna_func=None,neutralize: bool = False, numeric_exposure_cols: list = None, categorical_exposure_cols: list = None,
+							  log_transform_cols: list = None, min_obs: int = 20, new_col: str = None) -> pd.DataFrame:
+    """
+    通用因子预处理流水线：
+    - 可选填充缺失
+    - 可选去极值
+    - 可选标准化
+    - 可选中性化
+    - 可选再次标准化
+    """
+    out = df.copy()
+    out_col = new_col if new_col is not None else factor_col
+    out[out_col] = out[factor_col].copy()
+
+    if fillna_func is not None:
+        out[out_col] = out.groupby(date_col, group_keys=False).apply(
+            lambda x: fillna_func(x, out_col)).reset_index(level=0, drop=True)
+
+    if winsorize_func is not None:
+        out[out_col] = out.groupby(date_col)[out_col].transform(winsorize_func)
+
+    if standardize_func is not None:
+        out[out_col] = out.groupby(date_col)[out_col].transform(standardize_func)
+
+    if neutralize:
+        out[out_col] = out.groupby(date_col, group_keys=False).apply(
+            lambda x: neutralize_factors(
+                x, factor_col=out_col,
+                numeric_exposure_cols=numeric_exposure_cols,
+                categorical_exposure_cols=categorical_exposure_cols,
+                log_transform_cols=log_transform_cols,
+                min_obs=min_obs)).reset_index(level=0, drop=True)
+
+        if standardize_func is not None:
+            out[out_col] = out.groupby(date_col)[out_col].transform(standardize_func)
+
+    return out
+	
 def safe_qcut(s: pd.Series, q: int = 5) -> pd.Series:
     """
     安全的因子横截面分组函数，跳过 NaN
