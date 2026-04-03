@@ -4,26 +4,34 @@ from scipy import stats
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
 
-
-import pandas as pd
-import numpy as np
-from scipy import stats
-import statsmodels.api as sm
-import matplotlib.pyplot as plt
-
-
 # ------------------- 数据处理 ----------------------------------------
 
+
 def calc_fwd_ret(price_df: pd.DataFrame, date_col: str = 'date', ticker_col: str = 'ticker',
-                 price_col: str = 'close', periods: list = [1, 5, 20]) -> pd.DataFrame:
+                 price_col: str = 'close', adj_col: str = 'adj_factor', periods: list = [1, 5, 20]) -> pd.DataFrame:
     """
-    计算并对齐未来收益率。日频
+    计算并对齐未来收益率。支持传入复权因子进行准确计算。
+    
+    参数:
+    - adj_col: 复权因子列名。如果 DataFrame 中存在该列，则自动使用复权价计算收益率；
+               如果不存在，则默认 price_col 已经是复权价。
     """
     df = price_df.sort_values(by=[ticker_col, date_col]).copy()
 
+    # 判断数据中是否包含复权因子列
+    if adj_col in df.columns:
+        # 实际价值代理 = 原始收盘价 * 复权因子 (无论前复权还是后复权，相对涨跌幅是一致的)
+        calc_price = df[price_col] * df[adj_col]
+    else:
+        # 假设传入的 close 已经是前复权/后复权价格
+        calc_price = df[price_col]
+
     for period in periods:
-        future_price = df.groupby(ticker_col)[price_col].shift(-period)
-        df[f'next_ret_{period}d'] = future_price / df[price_col] - 1
+        # 获取未来第 period 期的价值代理
+        future_price = calc_price.groupby(df[ticker_col]).shift(-period)
+        # 计算真实收益率
+        df[f'next_ret_{period}d'] = future_price / calc_price - 1
+        
     return df
 
 
@@ -120,6 +128,7 @@ def standardize(s: pd.Series) -> pd.Series:
     """
     return (s - s.mean()) / (s.std() + 1e-12)
 
+
 def neutralize_factors(df: pd.DataFrame,factor_col: str,numeric_exposure_cols: list = None,categorical_exposure_cols: list = None,
 					   log_transform_cols: list = None,min_obs: int = 20, add_constant: bool = True) -> pd.Series:
     """
@@ -187,9 +196,9 @@ def neutralize_factors(df: pd.DataFrame,factor_col: str,numeric_exposure_cols: l
     return resid.reindex(df.index)
 	
 
-def preprocess_factor_general(df: pd.DataFrame,factor_col: str, date_col: str = 'date', winsorize_func=None, standardize_func=None,
-							  fillna_func=None,neutralize: bool = False, numeric_exposure_cols: list = None, categorical_exposure_cols: list = None,
-							  log_transform_cols: list = None, min_obs: int = 20, new_col: str = None) -> pd.DataFrame:
+def preprocess_factor_general(df: pd.DataFrame, factor_col: str, date_col: str = 'date', winsorize_func=None, standardize_func=None,
+                              fillna_func=None, neutralize: bool = False, numeric_exposure_cols: list = None, categorical_exposure_cols: list = None,
+                              log_transform_cols: list = None, min_obs: int = 20, new_col: str = None) -> pd.DataFrame:
     """
     通用因子预处理流水线：
     - 可选填充缺失
@@ -215,8 +224,8 @@ def preprocess_factor_general(df: pd.DataFrame,factor_col: str, date_col: str = 
     if neutralize:
         out[out_col] = out.groupby(date_col, group_keys=False).apply(
             lambda x: neutralize_factors(
-                x, factor_col=out_col,
-                numeric_exposure_cols=numeric_exposure_cols,
+                x, factor_col=out_col, 
+                numeric_exposure_cols=numeric_exposure_cols, 
                 categorical_exposure_cols=categorical_exposure_cols,
                 log_transform_cols=log_transform_cols,
                 min_obs=min_obs)).reset_index(level=0, drop=True)
@@ -228,14 +237,15 @@ def preprocess_factor_general(df: pd.DataFrame,factor_col: str, date_col: str = 
 	
 def safe_qcut(s: pd.Series, q: int = 5) -> pd.Series:
     """
-    安全的因子横截面分组函数，跳过 NaN
+    安全的因子横截面分组函数，强制打破结平，确保组别数量绝对等于 q
     """
     s_valid = s.dropna()
     if len(s_valid) < q:
         return pd.Series(index=s.index, dtype=float)
 
     try:
-        res = pd.qcut(s_valid, q, labels=False, duplicates='drop')
+        # 使用 rank(method='first') 添加微小扰动，保证能切出恰好 q 组
+        res = pd.qcut(s_valid.rank(method='first'), q, labels=False)
         return res.reindex(s.index)
     except Exception:
         return pd.Series(index=s.index, dtype=float)
@@ -316,7 +326,7 @@ def summarize_ic_series(ic_series: pd.Series, freq: str = 'D', direction: int = 
         'IC均值': ic_mean,
         'IC标准差': ic_std,
         'ICIR': icir,
-        'IC胜率': f"{win_rate * 100:.2f}%")
+        'IC胜率': f"{win_rate * 100:.2f}%"})
 
 
 def calc_ic_metrics(panel_df: pd.DataFrame, factor_col: str, date_col: str = 'date',
@@ -611,7 +621,7 @@ def check_group_monotonicity(group_ret_df: pd.DataFrame, q: int = 5, freq: str =
         '单调性': mono})
 
 
-# ------------------- 6. 更通用的换手率函数 ----------------------------------------
+# ------------------- 换手率函数 ----------------------------------------
 
 def calc_group_turnover(panel_df: pd.DataFrame, factor_col: str, date_col: str = 'date',
                         ticker_col: str = 'ticker', q: int = 5, freq: str = 'D',
@@ -738,36 +748,3 @@ def calc_cross_section_count(panel_df: pd.DataFrame, factor_col: str, ret_col: s
 
     return count_df
 
-
-# ------------------- 额外：预处理流水线（ ----------------------------------------
-
-def preprocess_factor(panel_df: pd.DataFrame, factor_col: str, date_col: str = 'date',
-                      ind_col: str = 'industry', mcap_col: str = 'market_cap',
-                      fillna_industry: bool = False, winsorize: bool = False,
-                      zscore: bool = False, rank: bool = False,
-                      neutralize_flag: bool = False, new_col: str = None) -> pd.DataFrame:
-    """
-    通用因子预处理流水线
-    """
-    df = panel_df.copy()
-    out_col = new_col if new_col is not None else factor_col
-
-    df[out_col] = df[factor_col]
-
-    if fillna_industry:
-        df[out_col] = fillna_with_industry(df, out_col, ind_col=ind_col)
-
-    if winsorize:
-        df[out_col] = df.groupby(date_col)[out_col].transform(handle_outliers)
-
-    if zscore:
-        df[out_col] = df.groupby(date_col)[out_col].transform(standardize)
-
-    if neutralize_flag:
-        df[out_col] = df.groupby(date_col, group_keys=False).apply(
-            lambda x: neutralize(x, out_col, mcap_col=mcap_col, ind_col=ind_col)).reset_index(level=0, drop=True)
-
-    if rank:
-        df[out_col] = df.groupby(date_col)[out_col].transform(rank_factor)
-
-    return df
