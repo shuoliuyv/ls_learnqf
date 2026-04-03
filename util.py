@@ -293,26 +293,30 @@ def calc_cross_sectional_ic_series(panel_df: pd.DataFrame, factor_col: str, ret_
     return ic_series
 
 
-def summarize_ic_series(ic_series: pd.Series, freq: str = 'D') -> pd.Series:
+def summarize_ic_series(ic_series: pd.Series, freq: str = 'D', direction: int = 1) -> pd.Series:
     """
-    对 IC 序列做汇总：IC均值、IC标准差、ICIR、胜率
+    direction: 1 表示正向因子，-1 表示负向因子
     """
     ic_series = ic_series.dropna()
     if len(ic_series) == 0:
         return pd.Series(dtype='object')
+
+    # 如果是负相关因子，先整体翻转 IC 值，这样均值、ICIR 和胜率都会自动修正
+    if direction == -1:
+        ic_series = -ic_series
 
     periods_per_year = _get_periods_per_year(freq)
 
     ic_mean = ic_series.mean()
     ic_std = ic_series.std(ddof=1)
     icir = (ic_mean / (ic_std + 1e-12)) * np.sqrt(periods_per_year)
-    win_rate = (ic_series > 0).mean()
+    win_rate = (ic_series > 0).mean() 
 
     return pd.Series({
         'IC均值': ic_mean,
         'IC标准差': ic_std,
         'ICIR': icir,
-        'IC胜率': f"{win_rate * 100:.2f}%"})
+        'IC胜率': f"{win_rate * 100:.2f}%")
 
 
 def calc_ic_metrics(panel_df: pd.DataFrame, factor_col: str, date_col: str = 'date',
